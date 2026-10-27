@@ -1,5 +1,28 @@
 # @neolution-ch/csag-workload-identity
 
+## 0.1.1
+
+### Patch Changes
+
+- [#16](https://github.com/neolution-ch/Csag.WorkloadIdentity/pull/16) [`7e357ae`](https://github.com/neolution-ch/Csag.WorkloadIdentity/commit/7e357ae90f4b0c036b15c571a2304bd01c9c6c03) Thanks [@dependabot](https://github.com/apps/dependabot)! - Bump the nuget-ecosystem group with 6 updates
+  
+  | Package | From | To | Bump |
+  |---------|------|----|------|
+  | Azure.Core | 1.53.0 | 1.63.0 | 🟡 minor |
+  | Azure.Storage.Blobs | 12.28.0 | 12.30.1 | 🟡 minor |
+  | coverlet.collector | 10.0.1 | 10.1.0 | 🟡 minor |
+  | Grpc.Core.Api | 2.83.0 | 2.84.0 | 🟡 minor |
+  | Microsoft.Data.SqlClient | 7.0.3 | 7.1.1 | 🟡 minor |
+  | xunit.runner.visualstudio | 3.1.1 | 4.0.0 | 🔴 major |
+
+- [#20](https://github.com/neolution-ch/Csag.WorkloadIdentity/pull/20) [`75befaf`](https://github.com/neolution-ch/Csag.WorkloadIdentity/commit/75befaf3e8ee7c0c04dd1bc771e2f27dbf23002b) Thanks [@neoscie](https://github.com/neoscie)! - Correct the package README and the cloud setup guide.
+  
+  - The `SqlConnection.AccessToken` sample now reads its own connection string, `ConnectionStrings:AzureSqlAccessToken`, which has no `Authentication` keyword. `SqlClient` throws an `InvalidOperationException` when you set `AccessToken` on a connection string that has this keyword.
+  - `SqlConnection.AccessTokenCallback` keeps a single pool only when all connections get the same delegate. The README now tells you to create the delegate one time.
+  - The README now shows the two overloads under "Registering with a given configuration or in code" as alternatives.
+  - The migration section now tells you that `Csag.WorkloadIdentity` does not reference `Microsoft.Data.SqlClient` and does not register `IMemoryCache`. `Neolution.AzureSqlFederatedIdentity` did both.
+  - The example of object-level grants in the setup guide no longer grants `EXECUTE` on the full `dbo` schema. The setup guide also quotes error 33134, which Azure SQL reports when the server identity is missing.
+
 ## 0.1.0
 
 ### Minor Changes

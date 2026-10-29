@@ -15,7 +15,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
  */
 function getFixedPackages() {
   const configPath = path.join(repoRoot, ".changeset", "config.json");
-  const raw = fs.readFileSync(configPath, "utf8").replace(/^﻿/, "");
+  const raw = fs.readFileSync(configPath, "utf8").replace(/^\uFEFF/, "");
   const config = JSON.parse(raw);
   // fixed is an array of arrays; flatten all groups
   return (config.fixed || []).flat();

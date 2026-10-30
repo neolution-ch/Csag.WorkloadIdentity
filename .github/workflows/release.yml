@@ -100,10 +100,18 @@ jobs:
                 per_page: 100,
             });
 
-            const prevTag = tags.find(t => {
-                const match = t.name.match(/(?:^v?|@)(\d+)\.\d+\.\d+$/);
-                return match && parseInt(match[1], 10) === prevMajor;
-            });
+            // Newest stable release of the previous major. Only tags of the packages just
+            // published (or bare vX.Y.Z tags) count, and versions are compared numerically
+            // because the tag list API does not return tags in version order.
+            const publishedNames = new Set(published.map(p => p.name));
+            const prevTag = tags
+                .map(t => {
+                    const match = t.name.match(/^(?:(.+)@|v)?(\d+)\.(\d+)\.(\d+)$/);
+                    if (!match || (match[1] !== undefined && !publishedNames.has(match[1]))) return null;
+                    return { tag: t, version: [match[2], match[3], match[4]].map(Number) };
+                })
+                .filter(c => c && c.version[0] === prevMajor)
+                .sort((a, b) => b.version[1] - a.version[1] || b.version[2] - a.version[2])[0]?.tag;
 
             if (!prevTag) {
                 console.log(`No tag found for v${prevMajor}, skipping branch creation.`);
@@ -111,11 +119,20 @@ jobs:
             }
 
             // Create the branch from the previous major's last tag
-            await github.rest.git.createRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: `refs/heads/${branchName}`,
-                sha: prevTag.commit.sha,
-            });
-
-            console.log(`Created ${branchName} from tag ${prevTag.name} (${prevTag.commit.sha}).`);
+            try {
+                await github.rest.git.createRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref: `refs/heads/${branchName}`,
+                    sha: prevTag.commit.sha,
+                });
+                console.log(`Created ${branchName} from tag ${prevTag.name} (${prevTag.commit.sha}).`);
+            } catch (e) {
+                // GitHub can refuse GITHUB_TOKEN when branching from an older commit (403). The
+                // release itself already succeeded, so warn with the manual command instead of failing.
+                if (e.status !== 403) throw e;
+                core.warning(
+                    `Could not create ${branchName} from ${prevTag.name}: ${e.message}. ` +
+                        `Create it by hand: git push origin ${prevTag.commit.sha}:refs/heads/${branchName}`,
+                );
+            }

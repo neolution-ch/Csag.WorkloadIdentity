@@ -1,5 +1,15 @@
 # @neolution-ch/csag-workload-identity
 
+## 0.1.2
+
+### Patch Changes
+
+- [#21](https://github.com/neolution-ch/Csag.WorkloadIdentity/pull/21) [`0dd9b1d`](https://github.com/neolution-ch/Csag.WorkloadIdentity/commit/0dd9b1df92e628a8804f710c50b12ee13d1b7148) Thanks [@dependabot](https://github.com/apps/dependabot)! - Bump the nuget-ecosystem group with 1 update
+  
+  | Package | From | To | Bump |
+  |---------|------|----|------|
+  | xunit.runner.visualstudio | 4.0.0 | 4.0.1 | 🟢 patch |
+
 ## 0.1.1
 
 ### Patch Changes

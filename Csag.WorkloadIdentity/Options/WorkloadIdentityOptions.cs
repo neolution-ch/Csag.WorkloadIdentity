@@ -3,7 +3,8 @@
     /// <summary>
     /// Options for obtaining Azure access tokens with the application's workload identity. Each supported resource
     /// has its own section; a resource whose section is absent is not configured, and its token provider cannot be
-    /// resolved.
+    /// resolved. The <see cref="Entra"/> entry configures the client assertion that the application sends to
+    /// Microsoft Entra ID. Without the entry, the client assertion provider cannot be resolved.
     /// </summary>
     public class WorkloadIdentityOptions
     {
@@ -11,6 +12,12 @@
         /// Gets the configuration section the options are bound from by default.
         /// </summary>
         public static string ConfigurationSectionName { get; } = "Csag.WorkloadIdentity";
+
+        /// <summary>
+        /// Gets or sets how the client assertion for Microsoft Entra ID is obtained, or <see langword="null"/> when
+        /// the application sends no client assertion, for example because its Microsoft sign-in uses a client secret.
+        /// </summary>
+        public EntraClientAssertionOptions? Entra { get; set; }
 
         /// <summary>
         /// Gets or sets how access tokens for Azure SQL are obtained, or <see langword="null"/> when the application

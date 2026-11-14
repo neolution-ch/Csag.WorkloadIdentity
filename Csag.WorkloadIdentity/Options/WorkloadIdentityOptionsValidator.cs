@@ -3,10 +3,10 @@
     using Microsoft.Extensions.Options;
 
     /// <summary>
-    /// Validates <see cref="WorkloadIdentityOptions"/>: at least one resource must be configured, every configured
-    /// resource must carry the complete settings of the provider it selects, and the refresh-ahead window must be
-    /// positive and at most five minutes. Every failure is reported, each naming the configuration path of the
-    /// offending value relative to the options section.
+    /// Validates <see cref="WorkloadIdentityOptions"/>. Every section is optional. Every configured resource must
+    /// carry the complete settings of the provider it selects. A configured Entra entry must name a service account
+    /// or a managed identity. The refresh-ahead window must be positive and at most five minutes. Every
+    /// failure is reported, each naming the configuration path of the offending value relative to the options section.
     /// </summary>
     internal sealed class WorkloadIdentityOptionsValidator : IValidateOptions<WorkloadIdentityOptions>
     {
@@ -23,13 +23,9 @@
             ArgumentNullException.ThrowIfNull(options);
 
             var builder = new ValidateOptionsResultBuilder();
-            if (options.AzureSql is null && options.BlobStorage is null)
-            {
-                builder.AddError($"At least one resource section ({nameof(options.AzureSql)} or {nameof(options.BlobStorage)}) must be configured.");
-            }
-
             ValidateResource(nameof(options.AzureSql), options.AzureSql, builder);
             ValidateResource(nameof(options.BlobStorage), options.BlobStorage, builder);
+            ValidateEntra(nameof(options.Entra), options.Entra, builder);
 
             if (options.RefreshAheadWindow <= TimeSpan.Zero)
             {
@@ -72,9 +68,54 @@
         }
 
         /// <summary>
-        /// Validates the managed identity section of a resource.
+        /// Validates the Entra entry, if present, against the provider it selects.
         /// </summary>
-        /// <param name="path">The configuration path of the resource section.</param>
+        /// <param name="path">The configuration path of the entry.</param>
+        /// <param name="entra">The entry, or <see langword="null"/> when it is not configured.</param>
+        /// <param name="builder">Receives a message for every invalid value.</param>
+        private static void ValidateEntra(string path, EntraClientAssertionOptions? entra, ValidateOptionsResultBuilder builder)
+        {
+            if (entra is null)
+            {
+                return;
+            }
+
+            switch (entra.Provider)
+            {
+                case WorkloadIdentityProvider.ManagedIdentity:
+                    ValidateManagedIdentity(path, entra.ManagedIdentity, builder);
+                    break;
+                case WorkloadIdentityProvider.Google:
+                    ValidateEntraGoogle(path, entra.Google, builder);
+                    break;
+                default:
+                    builder.AddError($"{path}:{nameof(entra.Provider)} must be {nameof(WorkloadIdentityProvider.ManagedIdentity)} or {nameof(WorkloadIdentityProvider.Google)}.");
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Validates the Google section of the Entra entry.
+        /// </summary>
+        /// <param name="path">The configuration path of the entry.</param>
+        /// <param name="google">The Google section, or <see langword="null"/> when it is absent.</param>
+        /// <param name="builder">Receives a message for every invalid value.</param>
+        private static void ValidateEntraGoogle(string path, GoogleServiceAccountOptions? google, ValidateOptionsResultBuilder builder)
+        {
+            var sectionPath = $"{path}:{nameof(EntraClientAssertionOptions.Google)}";
+            if (google is null)
+            {
+                builder.AddError($"{sectionPath} section must be provided when {path}:{nameof(EntraClientAssertionOptions.Provider)} is {nameof(WorkloadIdentityProvider.Google)}.");
+                return;
+            }
+
+            RequireValue(sectionPath, nameof(google.ServiceAccountEmail), google.ServiceAccountEmail, builder);
+        }
+
+        /// <summary>
+        /// Validates the managed identity section of a resource or of the Entra entry.
+        /// </summary>
+        /// <param name="path">The configuration path of the resource section or of the Entra entry.</param>
         /// <param name="managedIdentity">The managed identity section, or <see langword="null"/> when it is absent.</param>
         /// <param name="builder">Receives a message for every invalid value.</param>
         private static void ValidateManagedIdentity(string path, ManagedIdentityOptions? managedIdentity, ValidateOptionsResultBuilder builder)

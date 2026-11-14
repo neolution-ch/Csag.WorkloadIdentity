@@ -45,10 +45,10 @@
         }
 
         /// <summary>
-        /// Verifies that options without any resource section fail validation.
+        /// Verifies that options without any section pass validation.
         /// </summary>
         [Fact]
-        public void Given_NoResourceConfigured_When_Validate_Then_Fails()
+        public void Given_NothingConfigured_When_Validate_Then_Succeeds()
         {
             // Arrange
             var options = new WorkloadIdentityOptions();
@@ -57,8 +57,181 @@
             var result = this.validator.Validate(null, options);
 
             // Assert
+            result.Succeeded.ShouldBeTrue();
+        }
+
+        /// <summary>
+        /// Verifies that an Entra entry alone passes validation.
+        /// </summary>
+        [Fact]
+        public void Given_OnlyEntraWithGoogleServiceAccount_When_Validate_Then_Succeeds()
+        {
+            // Arrange
+            var options = new WorkloadIdentityOptions { Entra = CreateGoogleEntra() };
+
+            // Act
+            var result = this.validator.Validate(null, options);
+
+            // Assert
+            result.Succeeded.ShouldBeTrue();
+        }
+
+        /// <summary>
+        /// Verifies that an Entra entry with the Google provider and a blank service account email fails validation
+        /// with a message naming the key.
+        /// </summary>
+        /// <param name="serviceAccountEmail">The blank service account email.</param>
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public void Given_EntraWithBlankServiceAccountEmail_When_Validate_Then_FailsNamingKey(string? serviceAccountEmail)
+        {
+            // Arrange
+            var options = new WorkloadIdentityOptions { Entra = CreateGoogleEntra() };
+            options.Entra.Google.ShouldNotBeNull().ServiceAccountEmail = serviceAccountEmail;
+
+            // Act
+            var result = this.validator.Validate(null, options);
+
+            // Assert
             result.Failed.ShouldBeTrue();
-            result.FailureMessage.ShouldNotBeNull().ShouldContain("At least one resource section");
+            result.FailureMessage.ShouldNotBeNull().ShouldContain("Entra:Google:ServiceAccountEmail must be provided.");
+        }
+
+        /// <summary>
+        /// Verifies that an Entra entry with the Google provider and no Google section fails validation.
+        /// </summary>
+        [Fact]
+        public void Given_EntraWithGoogleProviderWithoutGoogleSection_When_Validate_Then_Fails()
+        {
+            // Arrange
+            var options = new WorkloadIdentityOptions
+            {
+                Entra = new EntraClientAssertionOptions { Provider = WorkloadIdentityProvider.Google },
+            };
+
+            // Act
+            var result = this.validator.Validate(null, options);
+
+            // Assert
+            result.Failed.ShouldBeTrue();
+            result.FailureMessage.ShouldNotBeNull().ShouldContain("Entra:Google section must be provided");
+        }
+
+        /// <summary>
+        /// Verifies that an Entra entry with a user-assigned managed identity passes validation.
+        /// </summary>
+        [Fact]
+        public void Given_EntraWithUserAssignedManagedIdentity_When_Validate_Then_Succeeds()
+        {
+            // Arrange
+            var options = new WorkloadIdentityOptions
+            {
+                Entra = new EntraClientAssertionOptions
+                {
+                    Provider = WorkloadIdentityProvider.ManagedIdentity,
+                    ManagedIdentity = new ManagedIdentityOptions { ClientId = ClientId },
+                },
+            };
+
+            // Act
+            var result = this.validator.Validate(null, options);
+
+            // Assert
+            result.Succeeded.ShouldBeTrue();
+        }
+
+        /// <summary>
+        /// Verifies that an Entra entry with the managed identity provider and no managed identity section fails
+        /// validation.
+        /// </summary>
+        [Fact]
+        public void Given_EntraWithManagedIdentityProviderWithoutSection_When_Validate_Then_Fails()
+        {
+            // Arrange
+            var options = new WorkloadIdentityOptions
+            {
+                Entra = new EntraClientAssertionOptions { Provider = WorkloadIdentityProvider.ManagedIdentity },
+            };
+
+            // Act
+            var result = this.validator.Validate(null, options);
+
+            // Assert
+            result.Failed.ShouldBeTrue();
+            result.FailureMessage.ShouldNotBeNull().ShouldContain("Entra:ManagedIdentity section must be provided");
+        }
+
+        /// <summary>
+        /// Verifies that an Entra entry with a managed identity and a blank client ID fails validation naming the key.
+        /// </summary>
+        /// <param name="clientId">The blank client ID.</param>
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("   ")]
+        public void Given_EntraWithManagedIdentityWithoutClientId_When_Validate_Then_FailsNamingKey(string? clientId)
+        {
+            // Arrange
+            var options = new WorkloadIdentityOptions
+            {
+                Entra = new EntraClientAssertionOptions
+                {
+                    Provider = WorkloadIdentityProvider.ManagedIdentity,
+                    ManagedIdentity = new ManagedIdentityOptions { ClientId = clientId },
+                },
+            };
+
+            // Act
+            var result = this.validator.Validate(null, options);
+
+            // Assert
+            result.Failed.ShouldBeTrue();
+            result.FailureMessage.ShouldNotBeNull().ShouldContain("Entra:ManagedIdentity:ClientId must be provided unless Entra:ManagedIdentity:UseSystemAssignedIdentity is true.");
+        }
+
+        /// <summary>
+        /// Verifies that an Entra entry with the system-assigned managed identity passes validation without a client ID.
+        /// </summary>
+        [Fact]
+        public void Given_EntraWithSystemAssignedManagedIdentity_When_Validate_Then_Succeeds()
+        {
+            // Arrange
+            var options = new WorkloadIdentityOptions
+            {
+                Entra = new EntraClientAssertionOptions
+                {
+                    Provider = WorkloadIdentityProvider.ManagedIdentity,
+                    ManagedIdentity = new ManagedIdentityOptions { UseSystemAssignedIdentity = true },
+                },
+            };
+
+            // Act
+            var result = this.validator.Validate(null, options);
+
+            // Assert
+            result.Succeeded.ShouldBeTrue();
+        }
+
+        /// <summary>
+        /// Verifies that an Entra entry with a provider value outside the enum fails validation naming the key.
+        /// </summary>
+        [Fact]
+        public void Given_EntraWithUndefinedProvider_When_Validate_Then_FailsNamingKey()
+        {
+            // Arrange
+            var options = new WorkloadIdentityOptions
+            {
+                Entra = new EntraClientAssertionOptions { Provider = (WorkloadIdentityProvider)42 },
+            };
+
+            // Act
+            var result = this.validator.Validate(null, options);
+
+            // Assert
+            result.Failed.ShouldBeTrue();
+            result.FailureMessage.ShouldNotBeNull().ShouldContain("Entra:Provider must be ManagedIdentity or Google.");
         }
 
         /// <summary>
@@ -354,6 +527,19 @@
                     ClientId = ClientId,
                     ServiceAccountEmail = ServiceAccountEmail,
                 },
+            };
+        }
+
+        /// <summary>
+        /// Creates an Entra entry that mints its client assertion for a Google service account.
+        /// </summary>
+        /// <returns>The entry.</returns>
+        private static EntraClientAssertionOptions CreateGoogleEntra()
+        {
+            return new EntraClientAssertionOptions
+            {
+                Provider = WorkloadIdentityProvider.Google,
+                Google = new GoogleServiceAccountOptions { ServiceAccountEmail = ServiceAccountEmail },
             };
         }
 

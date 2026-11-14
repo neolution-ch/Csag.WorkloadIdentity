@@ -1,6 +1,6 @@
 # Cloud and identity setup
 
-This guide sets up everything outside your code so that an application can reach Azure SQL and Azure Blob Storage through `Csag.WorkloadIdentity` without a password, key or secret: the identity the application presents to Microsoft Entra ID (formerly Azure Active Directory), the trust that identity needs, the grants on each resource, the application's configuration and the deployment. For the code that uses the tokens, see the [package README](../Csag.WorkloadIdentity/README.md); the [Demo](../Csag.WorkloadIdentity.Demo/README.md) is a complete application.
+This guide sets up everything outside your code so that an application can reach Azure SQL and Azure Blob Storage through `Csag.WorkloadIdentity` without a password, key or secret: the identity the application presents to Microsoft Entra ID (formerly Azure Active Directory), the trust that identity needs, the grants on each resource, the application's configuration and the deployment. For the code that uses the tokens, see the [package README](../Csag.WorkloadIdentity/README.md); the [Demo](../Csag.WorkloadIdentity.Demo/README.md) is a complete application. [Section F](#f-microsoft-entra-sign-in-without-a-client-secret) sets up a Microsoft Entra sign-in that needs no client secret.
 
 ## Choose your identity configuration
 
@@ -64,7 +64,7 @@ az webapp identity assign --resource-group <resource-group> --name <app-name> --
 
 ### A.3 Local development
 
-A workstation has no managed identity endpoint, so `"Provider": "ManagedIdentity"` only works on Azure. To run the same code locally, either configure the resource with the `Google` provider and Application Default Credentials (section B), or register your own `IAzureSqlTokenProvider` or `IBlobStorageTokenProvider` before calling `AddWorkloadIdentity` (every registration is a `TryAdd`, so yours wins), for example one built on `Azure.Identity`'s `AzureCliCredential`. `AddWorkloadIdentity` still validates the options, so the resource section has to be present and complete even though your provider ignores it; to avoid configuring it, register your provider and do not call `AddWorkloadIdentity` at all.
+A workstation has no managed identity endpoint, so `"Provider": "ManagedIdentity"` only works on Azure. To run the same code locally, either configure the resource with the `Google` provider and Application Default Credentials (section B), or register your own `IAzureSqlTokenProvider` or `IBlobStorageTokenProvider` before calling `AddWorkloadIdentity` (every registration is a `TryAdd`, so yours wins), for example one built on `Azure.Identity`'s `AzureCliCredential`. Your provider ignores the resource section, so leave the section out. `AddWorkloadIdentity` validates only the sections that are present.
 
 ## B. Google Cloud to Azure federation
 
@@ -258,6 +258,9 @@ The library binds its options from the `Csag.WorkloadIdentity` configuration sec
 
 | Configuration key | Environment variable | Value |
 |---|---|---|
+| `Csag.WorkloadIdentity:Entra:Provider` | `Csag.WorkloadIdentity__Entra__Provider` | `Google` (the default) or `ManagedIdentity` (F) |
+| `Csag.WorkloadIdentity:Entra:Google:ServiceAccountEmail` | `Csag.WorkloadIdentity__Entra__Google__ServiceAccountEmail` | Service account email for the client assertion of the sign-in (F.1) |
+| `Csag.WorkloadIdentity:Entra:ManagedIdentity:ClientId` | `Csag.WorkloadIdentity__Entra__ManagedIdentity__ClientId` | Client ID of the user-assigned identity for the client assertion of the sign-in (F.4); or set `Csag.WorkloadIdentity:Entra:ManagedIdentity:UseSystemAssignedIdentity` to `true` for the system-assigned identity |
 | `Csag.WorkloadIdentity:AzureSql:Provider` | `Csag.WorkloadIdentity__AzureSql__Provider` | `ManagedIdentity` (the default) or `Google` |
 | `Csag.WorkloadIdentity:AzureSql:ManagedIdentity:UseSystemAssignedIdentity` | `Csag.WorkloadIdentity__AzureSql__ManagedIdentity__UseSystemAssignedIdentity` | `true` for a system-assigned identity (A.1) |
 | `Csag.WorkloadIdentity:AzureSql:ManagedIdentity:ClientId` | `Csag.WorkloadIdentity__AzureSql__ManagedIdentity__ClientId` | Client ID of the user-assigned identity (A.2); required unless the previous key is `true` |
@@ -268,7 +271,7 @@ The library binds its options from the `Csag.WorkloadIdentity` configuration sec
 | `Csag.WorkloadIdentity:RefreshAheadWindow` | `Csag.WorkloadIdentity__RefreshAheadWindow` | Optional; how long before expiry a token is refreshed. Default `00:05:00`; must be positive and at most five minutes |
 | `Csag.WorkloadIdentity:EnableBackgroundRefresh` | `Csag.WorkloadIdentity__EnableBackgroundRefresh` | Optional; default `true` |
 
-At least one resource section is required, and a configured resource must carry the complete settings of the provider it selects; the application refuses to start otherwise and names the missing value. For the identity configuration A, using the system-assigned identity for both resources:
+Every section is optional, but a configured section must carry the complete settings of the provider it selects; the application refuses to start otherwise and names the missing value. For the identity configuration A, using the system-assigned identity for both resources:
 
 ```json
 {
@@ -352,6 +355,105 @@ gcloud run deploy <service> \
 To change only the identity of an existing service, use `gcloud run services update <service> --service-account <name>@<project-id>.iam.gserviceaccount.com`. In the console, the runtime service account is under the service's **Security** tab and the variables under **Variables & Secrets**.
 
 At startup the application validates its configuration. The first token request for each resource happens right after startup with background refresh on (the default), otherwise on the resource's first use. What that request does depends on the resource's provider: with `Google`, the application requests an ID token for the configured service account through ADC (as the runtime service account) and exchanges it at Microsoft Entra ID; with `ManagedIdentity`, it obtains the access token from the host's managed identity endpoint and no Google configuration is involved. If something fails, the application log names the failing step; the troubleshooting table in the [package README](../Csag.WorkloadIdentity/README.md) maps the usual messages to their cause.
+
+## F. Microsoft Entra sign-in without a client secret
+
+An application that signs users in with Microsoft Entra ID exchanges the authorization code at the token endpoint of Microsoft Entra ID. In that request, the application must authenticate as the client. With the `Entra` entry, the application sends a client assertion: a Google ID token of the service account of the application, or on Azure a token of its managed identity. The sign-in app registration has no client secret. The [package README](../Csag.WorkloadIdentity/README.md#client-assertion-for-a-microsoft-entra-sign-in) shows how the application puts the assertion into the token request. F.1 to F.3 set up the Google service account; F.4 sets up the managed identity.
+
+With the Google service account, the setup is that of section B, with these differences:
+
+- The holder of the federated credential is the **sign-in app registration**: the app registration whose client ID the sign-in configuration of the application uses, with the redirect URIs of the sign-in. It is not the identity of section B.2, which has no redirect URIs. A user-assigned managed identity cannot be the holder, because a sign-in needs an app registration.
+- The application needs no tenant ID and no client ID in the `Entra` entry. The sign-in configuration of the application has them.
+- Section C does not apply: the sign-in gets no access to a resource.
+
+### F.1 Google Cloud
+
+Use a service account as in B.1: the IAM Service Account Credentials API is enabled in its project (B.1.1), the identity the application runs as has `roles/iam.serviceAccountOpenIdTokenCreator` on the service account (B.1.3), and Application Default Credentials are available at runtime (B.1.4). The service account of the Azure resources can also serve the sign-in. Note its email and its unique ID (B.1.2).
+
+### F.2 Add the federated credential to the sign-in app registration
+
+1. In the Azure portal go to **Microsoft Entra ID** > **App registrations** and open the sign-in app registration.
+2. Go to **Certificates & secrets** > **Federated credentials** > **Add credential** and choose the **Other issuer** scenario.
+3. Fill in the values below and select **Add**.
+
+| Field | Value |
+|---|---|
+| Issuer | `https://accounts.google.com` |
+| Subject identifier | The service account's **unique ID** from B.1.2 (the numeric ID, not the email) |
+| Audience | `api://AzureADTokenExchange` (the default) |
+| Name | Any name, for example the service account's name |
+
+Or with the Azure CLI:
+
+```shell
+az ad app federated-credential create --id <sign-in-application-client-id> --parameters '{
+  "name": "<credential-name>",
+  "issuer": "https://accounts.google.com",
+  "subject": "<service-account-unique-id>",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
+```
+
+When the sign-in works with the assertion, delete the client secrets of the sign-in app registration under **Certificates & secrets** > **Client secrets**, and remove them from your secret store.
+
+### F.3 Configure the application
+
+```json
+{
+  "Csag.WorkloadIdentity": {
+    "Entra": {
+      "Provider": "Google",
+      "Google": {
+        "ServiceAccountEmail": "<name>@<project-id>.iam.gserviceaccount.com"
+      }
+    }
+  }
+}
+```
+
+On Cloud Run, supply the keys as environment variables, for example `Csag.WorkloadIdentity__Entra__Provider` = `Google` and `Csag.WorkloadIdentity__Entra__Google__ServiceAccountEmail`. Each sign-in asks Google for a new ID token. When a step of the setup is missing, the sign-in fails at the code exchange, and the application log names the cause:
+
+| Symptom | Likely cause |
+|---|---|
+| `RpcException` with status `PermissionDenied` | The identity the application runs as does not have `roles/iam.serviceAccountOpenIdTokenCreator` on the service account, or the IAM Service Account Credentials API is not enabled (F.1). |
+| Microsoft Entra ID answers `AADSTS70021`: no matching federated identity record | The sign-in app registration has no federated credential with this issuer, subject and audience, or the subject is the email and not the unique ID (F.2). |
+
+### F.4 On Azure: a managed identity
+
+An application on Azure, for example on App Service, can send a token of its managed identity in place of the Google ID token. The identity must be in the same tenant as the sign-in app registration. Microsoft describes the setup under [Configure an application to trust a managed identity](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity) and [Certificateless authentication with Microsoft.Identity.Web](https://learn.microsoft.com/entra/msidweb/authentication/certificateless).
+
+Prefer a user-assigned identity. A system-assigned identity also works, but it gets a new object ID when you delete the App Service and create it again, and you must then update the federated credential. The Microsoft page linked above says "You can only use User-Assigned Managed Identities as a credential" in its portal instructions. The Azure CLI command in step 2 creates the federated credential for a system-assigned identity too.
+
+1. Create a user-assigned managed identity and attach it to the App Service, as in A.2. Note its **client ID** and its **object (principal) ID**: `az identity show --resource-group <resource-group> --name <identity-name> --query "{clientId:clientId, objectId:principalId}"`. For the system-assigned identity, enable it as in A.1 and note its object ID: `az webapp identity show --resource-group <resource-group> --name <app-name> --query principalId --output tsv`.
+2. Add a federated credential to the sign-in app registration that trusts the identity:
+
+   ```shell
+   az ad app federated-credential create --id <sign-in-application-client-id> --parameters '{
+     "name": "<credential-name>",
+     "issuer": "https://login.microsoftonline.com/<tenant-id>/v2.0",
+     "subject": "<managed-identity-object-id>",
+     "audiences": ["api://AzureADTokenExchange"]
+   }'
+   ```
+
+3. Configure the application with the client ID of the identity:
+
+   ```json
+   {
+     "Csag.WorkloadIdentity": {
+       "Entra": {
+         "Provider": "ManagedIdentity",
+         "ManagedIdentity": {
+           "ClientId": "<user-assigned-managed-identity-client-id>"
+         }
+       }
+     }
+   }
+   ```
+
+   For the system-assigned identity, replace `"ClientId"` with `"UseSystemAssignedIdentity": true`. In App Service, supply the keys as application settings: `Csag.WorkloadIdentity__Entra__Provider` = `ManagedIdentity` and `Csag.WorkloadIdentity__Entra__ManagedIdentity__ClientId` (or `Csag.WorkloadIdentity__Entra__ManagedIdentity__UseSystemAssignedIdentity` = `true`).
+
+When the sign-in app registration has no federated credential at all, Microsoft Entra ID answers `AADSTS70025`.
 
 ## Security best practice: disable SQL authentication
 

@@ -3,14 +3,21 @@
 [![NuGet](https://img.shields.io/nuget/v/Csag.WorkloadIdentity.svg)](https://www.nuget.org/packages/Csag.WorkloadIdentity)
 [![License: MIT](https://img.shields.io/badge/License-MIT-lightgray.svg)](https://github.com/neolution-ch/Csag.WorkloadIdentity/blob/main/LICENSE)
 
-Passwordless access tokens for Azure SQL and Azure Blob Storage, obtained from the identity a .NET application already runs as. The model is resource-first: each Azure resource the application uses has its own configuration section that selects the identity provider the token comes from, either the **managed identity** of the Azure resource the application runs on (`ManagedIdentity`) or the application's **Google identity**, exchanged for a Microsoft Entra ID access token through workload identity federation (`Google`). The library holds one access token per resource, refreshes it ahead of expiry, and hands it to your code as a string for `SqlConnection.AccessToken` or as a `TokenCredential` for Azure SDK clients such as `BlobServiceClient`. No database password, storage key, client secret or service account key is stored anywhere.
+Passwordless access to Microsoft Entra ID for a .NET application, with the identity the application already runs as: the **managed identity** of the Azure resource it runs on (`ManagedIdentity`), or its **Google identity** through workload identity federation (`Google`). The library has two uses:
 
-How a token is obtained, per provider:
+- **Access tokens for Azure SQL and Azure Blob Storage.** Each resource has its own configuration section that selects the identity provider. The library holds one access token per resource, refreshes it ahead of expiry, and gives it to your code as a string for `SqlConnection.AccessToken` or as a `TokenCredential` for Azure SDK clients such as `BlobServiceClient`.
+- **A client assertion for a Microsoft Entra sign-in.** The `Entra` entry names the identity, and the application sends a token of that identity in place of the client secret of the sign-in app registration.
+
+No database password, storage key, client secret or service account key is stored anywhere.
+
+How a resource token is obtained, per provider:
 
 - **`ManagedIdentity`.** The library requests the token from the managed identity endpoint of the Azure resource the application runs on (App Service, Container Apps, Functions, a virtual machine, AKS and so on), as the system-assigned identity of that resource or as a user-assigned identity selected by its client ID.
 - **`Google`.** Using Application Default Credentials, the library asks the IAM Service Account Credentials API for a Google-signed ID token for the configured service account with the audience `api://AzureADTokenExchange`, and presents that ID token to Microsoft Entra ID as the client assertion of the identity that holds a federated credential trusting the service account: an app registration or a user-assigned managed identity.
 
 Either way the result is a Microsoft Entra ID access token for the resource's scope, `https://database.windows.net/.default` for Azure SQL and `https://storage.azure.com/.default` for Blob Storage.
+
+For the sign-in, the `Entra` entry names a Google service account or a managed identity, and `IEntraClientAssertionProvider` returns a token of that identity. The application sends this token to Microsoft Entra ID as the client assertion when it exchanges the sign-in code. See [Client assertion for a Microsoft Entra sign-in](#client-assertion-for-a-microsoft-entra-sign-in).
 
 - Repository: <https://github.com/neolution-ch/Csag.WorkloadIdentity>
 - Cloud and identity setup guide (managed identities, Google Cloud to Microsoft Entra ID federation, Azure SQL users, Blob Storage roles, deployment): <https://github.com/neolution-ch/Csag.WorkloadIdentity/blob/main/docs/cloud-identity-setup.md>
@@ -19,11 +26,12 @@ Either way the result is a Microsoft Entra ID access token for the resource's sc
 
 - Access tokens for **Azure SQL** (`IAzureSqlTokenProvider`) and **Azure Blob Storage** (`IBlobStorageTokenProvider`). Each resource is configured on its own, so the two can use different identities or different providers.
 - Two identity providers with no secrets to store or rotate: the Azure managed identity the application runs as, or its Google identity through workload identity federation.
+- A client assertion for a **Microsoft Entra sign-in** (`IEntraClientAssertionProvider`): a token of the Google service account or of the managed identity that replaces the client secret of the sign-in app registration.
 - `WorkloadIdentityTokenCredential` presents any of the providers to Azure SDK clients as a `TokenCredential`, for example to a `BlobServiceClient`.
 - Holds the current access token of each resource in memory and hands it out until it enters the configured refresh-ahead window. Callers that find no usable token share a single token request instead of each running their own.
 - Background refresh (on by default): a hosted service refreshes each resource's token ahead of its expiry, so requests are served from a valid token without waiting for a token request. Failed requests are retried with exponential backoff.
 - Options are validated when the host starts, so a missing or invalid value fails fast with a message that names it.
-- The public services, `IAzureSqlTokenProvider`, `IBlobStorageTokenProvider` and `IGoogleIdTokenProvider`, are registered with `TryAdd`, so you can replace any of them by registering your own implementation first. The background refresh hosted service is always added; turn it off with `EnableBackgroundRefresh` instead.
+- The public services, `IAzureSqlTokenProvider`, `IBlobStorageTokenProvider`, `IEntraClientAssertionProvider` and `IGoogleIdTokenProvider`, are registered with `TryAdd`, so you can replace any of them by registering your own implementation first. The background refresh hosted service is always added; turn it off with `EnableBackgroundRefresh` instead.
 - Targets `net8.0` and `net10.0`.
 
 ## Prerequisites
@@ -271,14 +279,94 @@ public sealed class DocumentStore(BlobServiceClient blobServiceClient)
 
 `IBlobStorageTokenProvider.GetBlobStorageAccessTokenAsync` returns the raw token string for code that calls the Blob REST API directly and sets the `Authorization: Bearer` header itself. `WorkloadIdentityTokenCredential` accepts any of the library's providers (`IAccessTokenProvider`), but each provider is bound to one resource and the adapter ignores the scopes an SDK client asks for: wrap the provider that matches the client, `IBlobStorageTokenProvider` for `BlobServiceClient`, never the Azure SQL provider, whose token carries the SQL audience.
 
+## Client assertion for a Microsoft Entra sign-in
+
+An application that signs users in with Microsoft Entra ID through OpenID Connect receives an authorization code. It exchanges the code at the token endpoint of Microsoft Entra ID. In this token request, the application must authenticate as the client. Usually, a client secret of the sign-in app registration does this. With the `Entra` entry, the application sends a client assertion in place of the secret. The client assertion (the OAuth 2.0 parameter `client_assertion`) is a token of the identity of the application: a Google ID token of its service account, or a token of its managed identity on Azure. A federated credential on the sign-in app registration trusts that identity. No secret exists, so nobody creates, stores or renews one.
+
+### Configure
+
+On Google Cloud, name the service account:
+
+```json
+{
+  "Csag.WorkloadIdentity": {
+    "Entra": {
+      "Provider": "Google",
+      "Google": {
+        "ServiceAccountEmail": "<name>@<project-id>.iam.gserviceaccount.com"
+      }
+    }
+  }
+}
+```
+
+On Azure, name the managed identity as for a resource: a user-assigned identity by its client ID, or the system-assigned identity with `"UseSystemAssignedIdentity": true`:
+
+```json
+{
+  "Csag.WorkloadIdentity": {
+    "Entra": {
+      "Provider": "ManagedIdentity",
+      "ManagedIdentity": {
+        "ClientId": "<user-assigned-managed-identity-client-id>"
+      }
+    }
+  }
+}
+```
+
+The entry holds no tenant ID and no client ID of the sign-in, because the sign-in configuration of the application already has them. `Provider` defaults to `Google`. All Microsoft Entra sign-ins of one application use the same identity.
+
+Prefer a user-assigned identity. A system-assigned identity gets a new object ID when you delete the Azure resource and create it again, and the federated credential must then name the new ID. [Certificateless authentication with Microsoft.Identity.Web](https://learn.microsoft.com/entra/msidweb/authentication/certificateless) documents both kinds of identity for this setup. [Configure an application to trust a managed identity](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity) says "You can only use User-Assigned Managed Identities as a credential" in its portal instructions. The Azure CLI command `az ad app federated-credential create` creates the federated credential for a system-assigned identity too.
+
+On the sign-in app registration, add a federated credential with the audience `api://AzureADTokenExchange` and these values:
+
+| Provider | Issuer | Subject |
+|---|---|---|
+| `Google` | `https://accounts.google.com` | The unique ID of the service account |
+| `ManagedIdentity` | `https://login.microsoftonline.com/<tenant-id>/v2.0` | The object (principal) ID of the managed identity |
+
+With `Google`, the Google side is the same as for the `Google` provider of a resource. The IAM Service Account Credentials API is enabled, and the identity the application runs as has `roles/iam.serviceAccountOpenIdTokenCreator` on the service account. With `ManagedIdentity`, the identity is attached to the Azure resource the application runs on, and it is in the same tenant as the sign-in app registration. The [setup guide](https://github.com/neolution-ch/Csag.WorkloadIdentity/blob/main/docs/cloud-identity-setup.md#f-microsoft-entra-sign-in-without-a-client-secret) gives the steps.
+
+### Use the client assertion
+
+The code is the same for both providers; only the configuration differs. Register the library with `AddWorkloadIdentity()`. In the OpenID Connect handler, set the assertion on the token request when the handler receives the authorization code:
+
+```csharp
+using Csag.WorkloadIdentity.Abstractions;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
+using Microsoft.Extensions.DependencyInjection;
+
+builder.Services.AddAuthentication()
+    .AddOpenIdConnect("microsoft", options =>
+    {
+        // Authority, ClientId, ResponseType = "code" and the other settings of the sign-in; no ClientSecret.
+        options.Events.OnAuthorizationCodeReceived = async context =>
+        {
+            var assertionProvider = context.HttpContext.RequestServices.GetRequiredService<IEntraClientAssertionProvider>();
+            var tokenRequest = context.TokenEndpointRequest!;
+            tokenRequest.ClientSecret = null;
+            tokenRequest.ClientAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+            tokenRequest.ClientAssertion = await assertionProvider.GetClientAssertionAsync(context.HttpContext.RequestAborted);
+        };
+    });
+```
+
+With `Google`, each call of `GetClientAssertionAsync` gets a new ID token from Google, so each sign-in makes one call to Google. With `ManagedIdentity`, the credential returns its cached token until the token is close to expiry. The library does not hold the token itself, and the background refresh does not include the `Entra` entry. Resolving `IEntraClientAssertionProvider` without the `Entra` entry throws an `InvalidOperationException` that names the entry.
+
 ## Options reference
 
-All keys live under the `Csag.WorkloadIdentity` section. `<resource>` stands for `AzureSql` or `BlobStorage`; the two sections have the same shape and are independent of each other.
+All keys live under the `Csag.WorkloadIdentity` section. `<resource>` stands for `AzureSql` or `BlobStorage`; the two sections have the same shape and are independent of each other. The `Entra` entry has fewer keys than a resource: the library does not send the token request of the sign-in, so the entry needs no tenant ID and no client ID.
 
 | Key | Required | Default | Description |
 |---|---|---|---|
-| `AzureSql` | at least one resource section | – | Configures how Azure SQL tokens are obtained. Without it, resolving `IAzureSqlTokenProvider` throws. |
-| `BlobStorage` | at least one resource section | – | Configures how Blob Storage tokens are obtained. Without it, resolving `IBlobStorageTokenProvider` throws. |
+| `Entra` | no | – | Configures the client assertion for a Microsoft Entra sign-in. Without it, resolving `IEntraClientAssertionProvider` throws. |
+| `Entra:Provider` | no | `Google` | `Google` or `ManagedIdentity`. Selects which of the two provider sections is read; the other is ignored. |
+| `Entra:Google:ServiceAccountEmail` | with `Google` | – | The Google service account the client assertion is minted for. The federated credential of the sign-in app registration names this account's unique ID as its subject. |
+| `Entra:ManagedIdentity:UseSystemAssignedIdentity` | no | `false` | `true` uses the system-assigned identity of the hosting resource; `ClientId` is then ignored. A user-assigned identity is preferred, because its object ID does not change. |
+| `Entra:ManagedIdentity:ClientId` | with `ManagedIdentity`, unless `UseSystemAssignedIdentity` is `true` | – | Client ID of the user-assigned managed identity. The federated credential of the sign-in app registration names the object ID of the identity as its subject. |
+| `AzureSql` | no | – | Configures how Azure SQL tokens are obtained. Without it, resolving `IAzureSqlTokenProvider` throws. |
+| `BlobStorage` | no | – | Configures how Blob Storage tokens are obtained. Without it, resolving `IBlobStorageTokenProvider` throws. |
 | `<resource>:Provider` | no | `ManagedIdentity` | `ManagedIdentity` or `Google`. Selects which of the two provider sections is read; the other is ignored. |
 | `<resource>:ManagedIdentity:UseSystemAssignedIdentity` | no | `false` | `true` uses the system-assigned identity of the hosting resource; `ClientId` is then ignored. |
 | `<resource>:ManagedIdentity:ClientId` | with `ManagedIdentity`, unless `UseSystemAssignedIdentity` is `true` | – | Client ID of the user-assigned managed identity. |
@@ -330,9 +418,9 @@ services.AddWorkloadIdentity(options =>
 });
 ```
 
-`WorkloadIdentityOptions`, `WorkloadIdentityResourceOptions`, `WorkloadIdentityProvider`, `GoogleOptions` and `ManagedIdentityOptions` live in `Csag.WorkloadIdentity.Options`; the provider interfaces and `IAccessTokenProvider` in `Csag.WorkloadIdentity.Abstractions`; `AddWorkloadIdentity` and `WorkloadIdentityTokenCredential` in `Csag.WorkloadIdentity`.
+`WorkloadIdentityOptions`, `WorkloadIdentityResourceOptions`, `EntraClientAssertionOptions`, `WorkloadIdentityProvider`, `GoogleOptions`, `GoogleServiceAccountOptions` and `ManagedIdentityOptions` live in `Csag.WorkloadIdentity.Options`; the provider interfaces and `IAccessTokenProvider` in `Csag.WorkloadIdentity.Abstractions`; `AddWorkloadIdentity` and `WorkloadIdentityTokenCredential` in `Csag.WorkloadIdentity`.
 
-The options are validated when the host starts: no resource section at all, a missing value in a configured resource's provider section, or a `RefreshAheadWindow` that is not positive or exceeds five minutes, throws an `OptionsValidationException` that names every offending value by its path, for example `AzureSql:Google:ServiceAccountEmail must be provided.` A `Provider` value other than `ManagedIdentity` or `Google` fails earlier, when the configuration is bound. Calling `AddWorkloadIdentity` more than once does not register the services twice. Both token providers are always registered; resolving the provider of a resource whose section is absent throws an `InvalidOperationException` that names the missing section.
+Every section is optional: without any section the host starts, and the services do nothing until a section is configured. The options are validated when the host starts: a missing value in the provider section of a configured resource or of the `Entra` entry, or a `RefreshAheadWindow` that is not positive or exceeds five minutes, throws an `OptionsValidationException` that names every offending value by its path, for example `AzureSql:Google:ServiceAccountEmail must be provided.` A `Provider` value other than `ManagedIdentity` or `Google` fails earlier, when the configuration is bound. Calling `AddWorkloadIdentity` more than once does not register the services twice. Both token providers and the client assertion provider are always registered; resolving one whose section is absent throws an `InvalidOperationException` that names the missing section.
 
 ## Migrating from Csag.AzureSqlFederatedIdentity / Neolution.AzureSqlFederatedIdentity
 
@@ -390,9 +478,10 @@ The options are validated when the host starts: no resource section at all, a mi
 
 | Symptom | Likely cause |
 |---|---|
-| The host fails to start with `OptionsValidationException` | No resource section, a required key missing in a configured resource, or a `RefreshAheadWindow` that is not positive or exceeds five minutes; the message names every offending value. |
+| The host fails to start with `OptionsValidationException` | A required key missing in a configured section, or a `RefreshAheadWindow` that is not positive or exceeds five minutes; the message names every offending value. |
 | The host fails to start with `InvalidOperationException: Failed to convert configuration value … 'Provider'` | The `Provider` value is not `ManagedIdentity` or `Google`. |
 | `InvalidOperationException`: "The AzureSql resource is not configured" (or `BlobStorage`) | `IAzureSqlTokenProvider` or `IBlobStorageTokenProvider` was resolved, but the configuration has no section for that resource. |
+| `InvalidOperationException`: "The Entra entry is not configured" | `IEntraClientAssertionProvider` was resolved, but the configuration has no `Entra` entry. |
 | `CredentialUnavailableException`: no managed identity endpoint found | `ManagedIdentity` is selected but the application is not running on an Azure resource with a managed identity, for example on a workstation. |
 | The managed identity endpoint reports that the identity was not found | The user-assigned identity is not attached to the hosting resource, or `ManagedIdentity:ClientId` is wrong. |
 | `RpcException` with status `PermissionDenied` in the log; the caller receives it as the inner exception of an `AuthenticationFailedException` | The runtime identity lacks `roles/iam.serviceAccountOpenIdTokenCreator` on the service account, or the IAM Service Account Credentials API is not enabled in the project. |

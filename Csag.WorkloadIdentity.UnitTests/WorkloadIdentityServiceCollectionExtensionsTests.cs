@@ -5,6 +5,7 @@
     using Csag.WorkloadIdentity.Internal;
     using Csag.WorkloadIdentity.Internal.Services;
     using Csag.WorkloadIdentity.Options;
+    using Google.Cloud.Iam.Credentials.V1;
     using Microsoft.Extensions.Configuration;
     using Microsoft.Extensions.DependencyInjection;
     using Microsoft.Extensions.Hosting;
@@ -77,11 +78,12 @@
         }
 
         /// <summary>
-        /// Verifies that missing configuration fails host startup with a validation error naming the requirement.
+        /// Verifies that a host without any configuration starts, and that resolving a token provider then fails with
+        /// a message naming its section.
         /// </summary>
         /// <returns>A task that represents the asynchronous operation.</returns>
         [Fact]
-        public async Task Given_MissingConfiguration_When_HostStarts_Then_ThrowsOptionsValidationException()
+        public async Task Given_MissingConfiguration_When_HostStarts_Then_StartsAndProvidersNameTheirSection()
         {
             // Arrange
             var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings());
@@ -89,10 +91,149 @@
             using var host = builder.Build();
 
             // Act
+            await host.StartAsync();
+            await host.StopAsync();
+
+            // Assert
+            var exception = Should.Throw<InvalidOperationException>(() => host.Services.GetRequiredService<IAzureSqlTokenProvider>());
+            exception.Message.ShouldContain("Csag.WorkloadIdentity:AzureSql");
+        }
+
+        /// <summary>
+        /// Verifies that a host whose section holds only an Entra entry, without a provider value, starts.
+        /// </summary>
+        /// <returns>A task that represents the asynchronous operation.</returns>
+        [Fact]
+        public async Task Given_SectionWithOnlyEntraWithoutProvider_When_HostStarts_Then_StartsWithGoogleProvider()
+        {
+            // Arrange
+            var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings());
+            builder.Configuration.AddInMemoryCollection(CreateEntraConfiguration(ServiceAccountEmail));
+            builder.Services.AddWorkloadIdentity();
+            using var host = builder.Build();
+
+            // Act
+            await host.StartAsync();
+            await host.StopAsync();
+
+            // Assert
+            var entra = host.Services.GetRequiredService<IOptions<WorkloadIdentityOptions>>().Value.Entra.ShouldNotBeNull();
+            entra.Provider.ShouldBe(WorkloadIdentityProvider.Google);
+        }
+
+        /// <summary>
+        /// Verifies that the background refresh renews the token of a configured resource and asks Google for no ID
+        /// token for the Entra entry. The substituted credential does not call its assertion callback, so every call
+        /// to Google comes from the Entra entry.
+        /// </summary>
+        /// <returns>A task that represents the asynchronous operation.</returns>
+        [Fact]
+        public async Task Given_ResourceAndEntra_When_BackgroundRefreshRuns_Then_MakesNoGoogleCallForEntra()
+        {
+            // Arrange
+            var refreshed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var credential = Substitute.For<TokenCredential>();
+            credential.GetTokenAsync(Arg.Any<TokenRequestContext>(), Arg.Any<CancellationToken>())
+                .Returns(_ =>
+                {
+                    refreshed.TrySetResult();
+                    return new AccessToken("federated-token", DateTimeOffset.UtcNow.AddHours(1));
+                });
+            var credentialFactory = Substitute.For<IClientAssertionCredentialFactory>();
+            credentialFactory.Create(TenantId, ClientId, Arg.Any<Func<CancellationToken, Task<string>>>()).Returns(credential);
+            var googleIdTokenProvider = Substitute.For<IGoogleIdTokenProvider>();
+            var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings());
+            builder.Services.AddSingleton(credentialFactory);
+            builder.Services.AddSingleton(googleIdTokenProvider);
+            builder.Services.AddWorkloadIdentity(options =>
+            {
+                options.AzureSql = CreateGoogleResource();
+                options.Entra = new EntraClientAssertionOptions
+                {
+                    Google = new GoogleServiceAccountOptions { ServiceAccountEmail = ServiceAccountEmail },
+                };
+            });
+            using var host = builder.Build();
+
+            // Act
+            await host.StartAsync();
+            await refreshed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await host.StopAsync();
+
+            // Assert
+            await googleIdTokenProvider.DidNotReceiveWithAnyArgs().GetIdTokenAsync(default!, default);
+        }
+
+        /// <summary>
+        /// Verifies that an Entra entry without a service account email fails host startup and names the key.
+        /// </summary>
+        /// <returns>A task that represents the asynchronous operation.</returns>
+        [Fact]
+        public async Task Given_EntraWithoutServiceAccountEmail_When_HostStarts_Then_ThrowsOptionsValidationExceptionNamingKey()
+        {
+            // Arrange
+            var builder = Host.CreateEmptyApplicationBuilder(new HostApplicationBuilderSettings());
+            builder.Configuration.AddInMemoryCollection(CreateEntraConfiguration(serviceAccountEmail: null));
+            builder.Services.AddWorkloadIdentity();
+            using var host = builder.Build();
+
+            // Act
             var exception = await Should.ThrowAsync<OptionsValidationException>(() => host.StartAsync());
 
             // Assert
-            exception.Message.ShouldContain("At least one resource section");
+            exception.Message.ShouldContain("Entra:Google:ServiceAccountEmail must be provided.");
+        }
+
+        /// <summary>
+        /// Verifies that the client assertion provider asks Google for an ID token for the service account of the
+        /// Entra entry, with the audience Microsoft Entra ID expects, and returns that token.
+        /// </summary>
+        /// <returns>A task that represents the asynchronous operation.</returns>
+        [Fact]
+        public async Task Given_EntraEntry_When_GetClientAssertionAsync_Then_ReturnsGoogleIdTokenForServiceAccountWithEntraAudience()
+        {
+            // Arrange
+            var client = Substitute.For<IAMCredentialsClient>();
+            client.GenerateIdTokenAsync(Arg.Any<GenerateIdTokenRequest>(), Arg.Any<CancellationToken>())
+                .Returns(new GenerateIdTokenResponse { Token = "google-id-token" });
+            var clientFactory = Substitute.For<IIamCredentialsClientFactory>();
+            clientFactory.CreateAsync(Arg.Any<CancellationToken>()).Returns(client);
+            var services = CreateServices(new ConfigurationBuilder().AddInMemoryCollection(CreateEntraConfiguration(ServiceAccountEmail)).Build());
+            services.AddSingleton(clientFactory);
+            services.AddWorkloadIdentity();
+            using var serviceProvider = services.BuildServiceProvider();
+
+            // Act
+            var assertion = await serviceProvider.GetRequiredService<IEntraClientAssertionProvider>().GetClientAssertionAsync(CancellationToken.None);
+
+            // Assert
+            assertion.ShouldBe("google-id-token");
+            await client.Received(1).GenerateIdTokenAsync(
+                Arg.Is<GenerateIdTokenRequest>(request =>
+                    request.Name == $"projects/-/serviceAccounts/{ServiceAccountEmail}"
+                    && request.Audience == "api://AzureADTokenExchange"),
+                Arg.Any<CancellationToken>());
+        }
+
+        /// <summary>
+        /// Verifies that resolving the client assertion provider without an Entra entry fails with a message naming
+        /// the entry, while the configured resource's provider still resolves.
+        /// </summary>
+        [Fact]
+        public void Given_NoEntraEntry_When_ResolvingClientAssertionProvider_Then_ThrowsInvalidOperationExceptionNamingEntry()
+        {
+            // Arrange
+            var services = new ServiceCollection();
+            services.AddLogging();
+            services.AddWorkloadIdentity(options => options.AzureSql = CreateGoogleResource());
+            using var serviceProvider = services.BuildServiceProvider();
+
+            // Act
+            var exception = Should.Throw<InvalidOperationException>(() => serviceProvider.GetRequiredService<IEntraClientAssertionProvider>());
+
+            // Assert
+            exception.Message.ShouldContain("Csag.WorkloadIdentity:Entra");
+            serviceProvider.GetRequiredService<IAzureSqlTokenProvider>().ShouldBeOfType<AzureSqlTokenProvider>();
         }
 
         /// <summary>
@@ -157,6 +298,7 @@
             // Assert
             services.Count(descriptor => descriptor.ServiceType == typeof(IAzureSqlTokenProvider)).ShouldBe(1);
             services.Count(descriptor => descriptor.ServiceType == typeof(IBlobStorageTokenProvider)).ShouldBe(1);
+            services.Count(descriptor => descriptor.ServiceType == typeof(IEntraClientAssertionProvider)).ShouldBe(1);
             services.Count(descriptor => descriptor.ServiceType == typeof(IWorkloadIdentityTokenExchanger)).ShouldBe(2);
             services.Count(descriptor => descriptor.ServiceType == typeof(IHostedService)).ShouldBe(1);
             services.Count(descriptor => descriptor.ServiceType == typeof(IValidateOptions<WorkloadIdentityOptions>)).ShouldBe(1);
@@ -320,6 +462,21 @@
                     [$"{section}:EnableBackgroundRefresh"] = "false",
                 })
                 .Build();
+        }
+
+        /// <summary>
+        /// Creates the configuration values of a default section that holds only an Entra entry. The entry has no
+        /// provider value, because Google is the default.
+        /// </summary>
+        /// <param name="serviceAccountEmail">The service account email of the entry, or <see langword="null"/> to leave it out.</param>
+        /// <returns>The configuration values.</returns>
+        private static Dictionary<string, string?> CreateEntraConfiguration(string? serviceAccountEmail)
+        {
+            var section = WorkloadIdentityOptions.ConfigurationSectionName;
+            return new Dictionary<string, string?>
+            {
+                [$"{section}:Entra:Google:ServiceAccountEmail"] = serviceAccountEmail,
+            };
         }
 
         /// <summary>

@@ -25,6 +25,37 @@ A .NET library that gives an application passwordless access tokens for Azure SQ
 
 3. To see it end to end, run the [Demo](./Csag.WorkloadIdentity.Demo/README.md) against your own resources.
 
+## Preview packages
+
+Each pull request to `main` or to a `release/**` branch publishes the package to a public preview feed on feedz.io. A draft PR, a PR from a fork and a PR from Dependabot publish no preview. The version is one patch above the current release, for example `0.1.2-pr.42.183` (PR 42, workflow run 183). The **"chore: version packages"** PR publishes a release candidate of the upcoming version, for example `0.2.0-pr.73.190`. Thus you can test all the changes of the next release before the release. A comment on the PR gives the version of its latest push. The feed removes previews after 30 days. Releases go to nuget.org only.
+
+To use a preview in an application, add the feed to the `nuget.config` of the application. The feed needs no credentials:
+
+```xml
+<packageSources>
+  <clear />
+  <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+  <add key="csag-workloadidentity-previews" value="https://f.feedz.io/collana-solutions/csag-workloadidentity/nuget/index.json" />
+</packageSources>
+<packageSourceMapping>
+  <packageSource key="nuget.org">
+    <package pattern="*" />
+    <package pattern="Csag.WorkloadIdentity" />
+  </packageSource>
+  <packageSource key="csag-workloadidentity-previews">
+    <package pattern="Csag.WorkloadIdentity" />
+  </packageSource>
+</packageSourceMapping>
+```
+
+The `Csag.WorkloadIdentity` pattern is also necessary under nuget.org. NuGet looks for a package only in the sources of its most specific pattern, so the `*` pattern does not apply to `Csag.WorkloadIdentity`. If nuget.org does not have the `Csag.WorkloadIdentity` pattern, the released versions do not restore.
+
+To test a preview:
+
+1. Set `Csag.WorkloadIdentity` to the preview version.
+2. If the application restores in locked mode, update its `packages.lock.json` files.
+3. Add the feed only on the branch that tests the preview. The main branch of the application then does not need feedz.io to restore.
+
 ## Release process
 
 This repository follows the [neolution-ch release playbook](https://github.com/neolution-ch/release-playbook) (Changesets, NuGet variant):

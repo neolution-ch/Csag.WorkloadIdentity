@@ -1,0 +1,116 @@
+name: NuGet Preview
+
+# Publishes the package of a pull request to the public feedz.io preview feed. An application can then
+# use the change before a release, and the change does not use a nuget.org version. A restore from the
+# feed needs no credentials. A retention rule of the feed removes previews after 30 days, so this workflow
+# does not delete old versions. Releases go to nuget.org only, through the NuGet Publish workflow.
+on:
+  pull_request:
+    branches:
+      - main
+      - "release/**"
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# A newer push to the same PR replaces the build that has not finished.
+concurrency:
+  group: nuget-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  FEED_URL: https://f.feedz.io/collana-solutions/csag-workloadidentity/nuget/index.json
+
+jobs:
+  publish:
+    name: Publish preview package
+    # Fork and Dependabot PRs do not get the FEEDZ_TOKEN secret.
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Compute preview version
+        id: version
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          # A feature PR has the current release in package.json, so its preview is one patch above it.
+          # The changesets release PR has the upcoming version, so its preview is a release candidate of
+          # that version. Thus each preview sorts above the current release. The run number makes each
+          # push a new version, because NuGet caches a package by id and version and does not download
+          # the same version again.
+          BASE=$(node -p "require('./Csag.WorkloadIdentity/package.json').version")
+          IFS=. read -r MAJOR MINOR PATCH <<< "${BASE%%-*}"
+          if [[ "$HEAD_REF" != changeset-release/* ]]; then
+            PATCH=$((PATCH + 1))
+          fi
+          echo "version=${MAJOR}.${MINOR}.${PATCH}-pr.${PR_NUMBER}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Remove changesets version-tracking stubs
+        run: |
+          # Remove the package.json files, so that they do not go into the NuGet package
+          find . -name package.json -not -path "./node_modules/*" -delete
+
+      - name: Restore
+        run: dotnet restore --locked-mode
+
+      - name: Pack
+        run: dotnet pack Csag.WorkloadIdentity --configuration Release --no-restore -p:Version=${{ steps.version.outputs.version }} -o ./nupkgs
+
+      - name: Push to feedz.io
+        env:
+          FEEDZ_TOKEN: ${{ secrets.FEEDZ_TOKEN }}
+        run: |
+          dotnet nuget push "./nupkgs/*.nupkg" \
+            --api-key "$FEEDZ_TOKEN" \
+            --source "$FEED_URL" \
+            --skip-duplicate
+
+      # One comment per PR. Each push updates the same comment.
+      - name: Comment preview version
+        uses: actions/github-script@v9
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        with:
+          script: |
+            const marker = '<!-- nuget-preview -->';
+            const { VERSION: version } = process.env;
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const sha = context.payload.pull_request.head.sha.slice(0, 7);
+
+            const body = [
+              marker,
+              '### NuGet preview package',
+              '',
+              `\`${version}\` for ${sha} is on the [preview feed](${context.serverUrl}/${owner}/${repo}#preview-packages). Set \`Csag.WorkloadIdentity\` to this version:`,
+              '',
+              '```xml',
+              `<PackageVersion Include="Csag.WorkloadIdentity" Version="${version}" />`,
+              '```',
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+            });
+            const existing = comments.find((c) => c.user.type === 'Bot' && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
